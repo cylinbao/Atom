@@ -7,7 +7,6 @@ from qLinearLayer import find_qlinear_layers
 from qOPTLayer import QOPTDecoderLayer
 from gptq import GPTQ, Quantizer_GPTQ
 from functools import partial
-
 from quant import quantize_activation_wrapper, quantize_attn_v_wrapper, quantize_attn_k_wrapper
 
 def reorder_model_opt(model, device, args, reorder_index):

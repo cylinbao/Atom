@@ -3,7 +3,7 @@ from torch import nn
 from typing import List, Optional, Tuple
 from transformers.models.opt.configuration_opt import OPTConfig
 from transformers.models.opt.modeling_opt import OPTDecoderLayer, OPTAttention
-from qLinearLayer import QLinearLayer
+from qLinearLayer import QLinearLayer, QLayerNorm
 from quant import Quantizer
 
 class QOPTAttention(nn.Module):
@@ -182,35 +182,6 @@ class QOPTAttention(nn.Module):
         attn_output = self.out_proj(attn_output)
 
         return attn_output, attn_weights_reshaped, past_key_value
-
-class QLayerNorm(torch.nn.Module):
-    def __init__(self, 
-                 originalNorm: nn.LayerNorm,
-                 args    
-        ):
-        super().__init__()
-        # self.input_scale = 1.0
-        self.abits = args.abits
-        self.eps = originalNorm.eps
-        self.register_buffer('weight', originalNorm.weight)
-        self.register_buffer('bias', originalNorm.bias)
-        self.register_buffer("reorder_index", None)
-        self.act_quant = lambda x: x
-
-    def forward(self, hidden_states):
-        hidden_states = hidden_states.to(self.weight.dtype)
-        outputs = torch.nn.functional.layer_norm(
-            hidden_states, hidden_states.shape[-1:], self.weight, self.bias, self.eps)
-
-        if self.reorder_index is not None:
-            assert outputs.shape[outputs.dim()-1] == self.reorder_index.shape[0]
-            outputs = torch.index_select(outputs, outputs.dim()-1, self.reorder_index)
-
-        if self.abits < 16:
-            outputs = self.act_quant(outputs)
-
-        return outputs 
-
 
 class QOPTDecoderLayer(nn.Module):
     def __init__(self, 

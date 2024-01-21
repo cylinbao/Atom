@@ -9,7 +9,7 @@ from transformers.models.falcon.modeling_falcon import FalconDecoderLayer, Falco
 from transformers.models.falcon.modeling_falcon import FalconRotaryEmbedding, FalconLinearScalingRotaryEmbedding, FalconDynamicNTKScalingRotaryEmbedding
 from transformers.models.falcon.modeling_falcon import dropout_add
 from qLlamaLayer import apply_rotary_pos_emb
-from qLinearLayer import QLinearLayer
+from qLinearLayer import QLinearLayer, QLayerNorm
 
 class QFalconAttention(nn.Module):
     def __init__(self, 
@@ -18,6 +18,8 @@ class QFalconAttention(nn.Module):
         ):
         super().__init__()
 
+        self.abits = args.abits
+        self.q_kv_cache = args.kv_cache
         self.config = originalAttn.config
         self.hidden_size = self.config.hidden_size
         self.num_heads = self.config.num_attention_heads
@@ -28,6 +30,9 @@ class QFalconAttention(nn.Module):
         self.rope_theta = self.config.rope_theta
         self.is_causal = True
         self._use_sdpa = self.config._attn_implementation == "sdpa"
+        self.act_quant = lambda x: x
+        self.k_quant = lambda x: x
+        self.v_quant = lambda x: x
 
         if self.head_dim * self.num_heads != self.hidden_size:
             raise ValueError(
@@ -167,6 +172,11 @@ class QFalconAttention(nn.Module):
         key_layer = key_layer.transpose(1, 2).reshape(batch_size, num_kv_heads, query_length, self.head_dim)
         value_layer = value_layer.transpose(1, 2).reshape(batch_size, num_kv_heads, query_length, self.head_dim)
 
+        # Fake quantize the key_states.
+        # Preserve the position embedding info by first quantize.
+        if self.q_kv_cache:
+            key_layer = self.k_quant(key_layer)
+
         kv_seq_len = key_layer.shape[-2]
         if layer_past is not None:
             kv_seq_len += layer_past[0].shape[-2]
@@ -195,6 +205,10 @@ class QFalconAttention(nn.Module):
             key_layer = key_layer.contiguous()
             value_layer = value_layer.contiguous()
 
+                # Fake quantize the value_states
+        if self.q_kv_cache:
+            value_states = self.v_quant(value_states)
+
         if alibi is None:
             if self._use_sdpa and not output_attentions:
                 attn_output = F.scaled_dot_product_attention(
@@ -219,6 +233,9 @@ class QFalconAttention(nn.Module):
             attn_output = attn_output.permute(0, 2, 1, 3)
             attn_output = attn_output.reshape(batch_size, query_length, self.num_heads * self.head_dim)
 
+            if self.abits < 16:
+                attn_output = self.act_quant(attn_output)
+
             attn_output = self.dense(attn_output)
 
             if output_attentions:
@@ -233,7 +250,8 @@ class QFalconAttention(nn.Module):
                     key_layer,
                     value_layer,
                     attn_mask=attention_mask,
-                    dropout_p=self.attention_dropout.p if self.training else 0.0,
+                    # dropout_p=self.attention_dropout.p if self.training else 0.0,
+                    dropout_p=0.0,
                     is_causal=self.is_causal and attention_mask is None and query_length > 1,
                 )
                 attn_output = attn_output.transpose(1, 2)
@@ -256,7 +274,8 @@ class QFalconAttention(nn.Module):
                 attention_logits *= self.inv_norm_factor
                 attention_probs = F.softmax(attention_logits + attention_mask, dim=-1, dtype=hidden_states.dtype)
                 # [batch_size, num_heads, q_length, kv_length]
-                attention_probs = self.attention_dropout(attention_probs)
+
+                # attention_probs = self.attention_dropout(attention_probs)
 
                 if head_mask is not None:
                     attention_probs = attention_probs * head_mask
@@ -284,12 +303,18 @@ class QFalconMLP(nn.Module):
         ):
         super().__init__()
 
+        self.abits = args.abits
         self.dense_h_to_4h = QLinearLayer(originalMLP.dense_h_to_4h, args)
         self.act = nn.GELU()
         self.dense_4h_to_h = QLinearLayer(originalMLP.dense_4h_to_h, args)
+        self.act_quant = lambda x: x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.act(self.dense_h_to_4h(x))
+
+        if self.abits < 16:
+            x = self.act_quant(x)
+
         x = self.dense_4h_to_h(x)
         return x
 
@@ -326,13 +351,13 @@ class QFalconDecoderLayer(nn.Module):
 
         if self.config.new_decoder_architecture:
             # The layer norm before self-attention
-            self.ln_attn = QFalconLayerNorm(originalLayer.ln_attn, args)
+            self.ln_attn = QLayerNorm(originalLayer.ln_attn, args)
             # The layer norm before the MLP
-            self.ln_mlp = QFalconLayerNorm(originalLayer.ln_mlp, args)
+            self.ln_mlp = QLayerNorm(originalLayer.ln_mlp, args)
         else:
-            self.input_layernorm = QFalconLayerNorm(originalLayer.input_layernorm, args)
+            self.input_layernorm = QLayerNorm(originalLayer.input_layernorm, args)
             if not self.config.parallel_attn:
-                self.post_attention_layernorm = QFalconLayerNorm(originalLayer.post_attention_layernorm, args)
+                self.post_attention_layernorm = QLayerNorm(originalLayer.post_attention_layernorm, args)
 
     def forward(
         self,
@@ -378,8 +403,11 @@ class QFalconDecoderLayer(nn.Module):
             if self.config.parallel_attn:
                 mlp_layernorm_out = attention_layernorm_out
             else:
+                # residual = dropout_add(
+                #     attention_output, residual, self.config.attention_dropout, training=self.training
+                # )
                 residual = dropout_add(
-                    attention_output, residual, self.config.attention_dropout, training=self.training
+                    attention_output, residual, prob=0.0, training=False
                 )
                 mlp_layernorm_out = self.post_attention_layernorm(residual)
 
@@ -391,7 +419,8 @@ class QFalconDecoderLayer(nn.Module):
         if self.config.new_decoder_architecture or self.config.parallel_attn:
             mlp_output += attention_output
 
-        output = dropout_add(mlp_output, residual, self.config.hidden_dropout, training=self.training)
+        # output = dropout_add(mlp_output, residual, self.config.hidden_dropout, training=self.training)
+        output = dropout_add(mlp_output, residual, prob=0.0, training=False)
 
         if use_cache:
             outputs = (output,) + outputs

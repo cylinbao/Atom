@@ -5,6 +5,7 @@ from eval import *
 from collections import defaultdict
 from pprint import pprint
 from modelutils_llama import quantize_model_llama, reorder_model_llama, quantize_model_gptq_llama,  add_act_quant_wrapper_llama
+from modelutils_falcon import quantize_model_falcon, add_act_quant_wrapper_falcon, reorder_model_falcon
 from modelutils_opt import quantize_model_opt, reorder_model_opt, quantize_model_gptq_opt,  add_act_quant_wrapper_opt
 from parallel_utils import map_layers_to_multi_gpus
 from LMClass import LMClass
@@ -12,30 +13,29 @@ import lm_eval
 from eval import pattern_match
 
 
-def get_llama(model):
-    import torch
+def get_model(model_path):
     def skip(*args, **kwargs):
         pass
     torch.nn.init.kaiming_uniform_ = skip
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
-    from transformers import LlamaForCausalLM
-    model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
-    model.seqlen = 2048
-    return model
 
-def get_opt(model):
-    import torch
-    def skip(*args, **kwargs):
-        pass
-    torch.nn.init.kaiming_uniform_ = skip
-    torch.nn.init.uniform_ = skip
-    torch.nn.init.normal_ = skip
-    from transformers import OPTForCausalLM
-    model = OPTForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
-    model.seqlen = model.config.max_position_embeddings
-    return model
+    if "llama" in model_path.lower():
+        from transformers import LlamaForCausalLM
+        model = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16)
+        model.seqlen = 2048
+    elif "opt" in model_path.lower():
+        from transformers import OPTForCausalLM
+        model = OPTForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16)
+        model.seqlen = model.config.max_position_embeddings
+    elif "falcon" in model_path.lower():
+        from transformers import FalconForCausalLM
+        model = FalconForCausalLM.from_pretrained(model_path, torch_dtype=torch.float16)
+        model.seqlen = model.config.max_position_embeddings
+    else:
+        raise NotImplementedError("Model not supported.")
 
+    return model
 
 if __name__ == '__main__':
     import argparse
@@ -86,7 +86,7 @@ if __name__ == '__main__':
         help='Whether to perform static quantization (For activtions). Default is dynamic. (Deprecated in Atom)'
     )
     parser.add_argument(
-        '--weight_group_size', type=int, default=0, choices=[0, 32, 64, 128, 256, 384, 768],
+        '--weight_group_size', type=int, default=0, choices=[0, 32, 64, 128, 142, 256, 384, 768],
         help='Group size when quantizing weights. Using 128 as default quantization group.'
     )
     parser.add_argument(
@@ -94,7 +94,7 @@ if __name__ == '__main__':
         help='Group size of channels that will quantize together. (only for weights now)'
     )
     parser.add_argument(
-        '--act_group_size', type=int, default=0, choices=[0, 64, 128, 256, 384, 768],
+        '--act_group_size', type=int, default=0, choices=[0, 64, 128, 142, 256, 384, 768],
         help='Group size when quantizing activations. Using 128 as default quantization group.'
     )
     parser.add_argument(
@@ -175,8 +175,11 @@ if __name__ == '__main__':
     model_name = args.model.lower().split('/')[-1]
     assert model_name != None, "Please check the model path."
 
+    model = get_model(args.model)
+    model.eval()
+
     if "llama" in args.model.lower():
-        model = get_llama(args.model)
+        # model = get_llama(args.model)
         get_act_stats_func = get_act_stats_llama
         reorder_model_func = reorder_model_llama
         add_act_quant_wrapper_func = add_act_quant_wrapper_llama
@@ -184,14 +187,19 @@ if __name__ == '__main__':
         quantize_model_func = quantize_model_llama
         eval_func = llama_eval
     elif "opt" in args.model.lower():
-        model = get_opt(args.model)
+        # model = get_opt(args.model)
         get_act_stats_func = get_act_stats_opt
         reorder_model_func = reorder_model_opt
         add_act_quant_wrapper_func = add_act_quant_wrapper_opt
         quantize_model_gptq_func = quantize_model_gptq_opt
         quantize_model_func = quantize_model_opt
         eval_func = opt_eval
-    model.eval()
+    elif "falcon" in args.model.lower():
+        get_act_stats_func = get_act_stats_falcon
+        reorder_model_func = reorder_model_falcon
+        add_act_quant_wrapper_func = add_act_quant_wrapper_falcon
+        quantize_model_func = quantize_model_falcon
+        eval_func = falcon_eval
 
     import os
 
@@ -206,7 +214,7 @@ if __name__ == '__main__':
             )
 
             print("Getting reording index...")
-            reorder_index = get_reorder_index(model, act_scales)
+            reorder_index = get_reorder_index(model, act_scales, args)
 
             if not os.path.exists(args.save_dir):
                 os.makedirs(args.save_dir)
@@ -240,7 +248,8 @@ if __name__ == '__main__':
 
 
     if args.eval_ppl:
-        datasets = ['wikitext2', 'ptb', 'c4']
+        # datasets = ['wikitext2', 'ptb', 'c4']
+        datasets = ['wikitext2']
 
         for dataset in datasets:
             dataloader, testloader = get_loaders(
