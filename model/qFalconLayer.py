@@ -33,6 +33,8 @@ class QFalconAttention(nn.Module):
         self.act_quant = lambda x: x
         self.k_quant = lambda x: x
         self.v_quant = lambda x: x
+        self.register_buffer("out_reorder_index", None)
+        self.register_buffer("tmp_reorder_index", None)
 
         if self.head_dim * self.num_heads != self.hidden_size:
             raise ValueError(
@@ -233,6 +235,10 @@ class QFalconAttention(nn.Module):
             attn_output = attn_output.permute(0, 2, 1, 3)
             attn_output = attn_output.reshape(batch_size, query_length, self.num_heads * self.head_dim)
 
+            # Reorder the BMM output to feed into o.proj
+            if self.out_reorder_index is not None:
+                attn_output = torch.index_select(attn_output, 2, self.out_reorder_index)
+
             if self.abits < 16:
                 attn_output = self.act_quant(attn_output)
 
@@ -256,6 +262,13 @@ class QFalconAttention(nn.Module):
                 )
                 attn_output = attn_output.transpose(1, 2)
                 attn_output = attn_output.reshape(batch_size, query_length, self.num_heads * self.head_dim)
+
+                # Reorder the BMM output to feed into o.proj
+                if self.out_reorder_index is not None:
+                    attn_output = torch.index_select(attn_output, 2, self.out_reorder_index)
+
+                if self.abits < 16:
+                    attn_output = self.act_quant(attn_output)
 
                 attn_output = self.dense(attn_output)
             else:
@@ -288,6 +301,13 @@ class QFalconAttention(nn.Module):
 
                 # change view [batch_size, q_length, num_heads * head_dim]
                 attn_output = self._merge_heads(attn_output)
+
+                # Reorder the BMM output to feed into o.proj
+                if self.reorder_index is not None:
+                    attn_output = torch.index_select(attn_output, 2, self.reorder_index)
+
+                if self.abits < 16:
+                    attn_output = self.act_quant(attn_output)
 
                 attn_output = self.dense(attn_output)
 
@@ -348,6 +368,7 @@ class QFalconDecoderLayer(nn.Module):
         self.self_attention = QFalconAttention(originalLayer.self_attention, args)
         self.mlp = QFalconMLP(originalLayer.mlp, args)
         self.hidden_dropout = self.config.hidden_dropout
+        self.register_buffer("mlp_reorder_index", None)
 
         if self.config.new_decoder_architecture:
             # The layer norm before self-attention
@@ -402,6 +423,9 @@ class QFalconDecoderLayer(nn.Module):
         if not self.config.new_decoder_architecture:
             if self.config.parallel_attn:
                 mlp_layernorm_out = attention_layernorm_out
+
+                if self.mlp_reorder_index is not None:
+                    mlp_layernorm_out = torch.index_select(mlp_layernorm_out, 2, self.mlp_reorder_index)
             else:
                 # residual = dropout_add(
                 #     attention_output, residual, self.config.attention_dropout, training=self.training

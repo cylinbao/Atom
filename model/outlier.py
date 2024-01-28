@@ -346,9 +346,10 @@ def get_reorder_index(model, act_scales, args):
             # Reorder Index of Q,K,V's output (Self-attn's input)
             # Used to determine each head's reorder index
             # Assume head_dim == 128
-            outputName = name + ".output"
-            act_orders[outputName] = reorder_tensor_heads(act_scales[outputName])
-            assert act_orders[outputName].dim() == 1, "Return Index must be 1 dimensional"
+            # temporarily disabled reorder on output dimension
+            # outputName = name + ".output"
+            # act_orders[outputName] = reorder_tensor_heads(act_scales[outputName])
+            # assert act_orders[outputName].dim() == 1, "Return Index must be 1 dimensional"
 
     return act_orders
 
