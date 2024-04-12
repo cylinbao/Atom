@@ -64,6 +64,7 @@ class QMixtralRMSNorm(nn.Module):
         super().__init__()
         self.originalRMSNorm = originalRMSNorm
         self.register_buffer("reorder_index", None)
+        self.act_quant = lambda x: x
         self.args = args
 
     @torch.no_grad()
@@ -73,6 +74,10 @@ class QMixtralRMSNorm(nn.Module):
             assert result.shape[result.dim()-1] == self.reorder_index.shape[0]
             result = torch.index_select(result, result.dim()-1, self.reorder_index)
 
+        # quantize activations before the MoE gate
+        if self.args.abits < 16:
+            hidden_states = self.act_quant(hidden_states)
+
         return result
     
     def to(self, *args, **kwargs):
@@ -80,6 +85,7 @@ class QMixtralRMSNorm(nn.Module):
         self.originalRMSNorm = self.originalRMSNorm.to(*args, **kwargs)
         if self.reorder_index is not None:
             self.reorder_index = self.reorder_index.to(*args, **kwargs)
+
         return self
 
 
@@ -283,7 +289,6 @@ class QMixtralSparseMoeBlock(nn.Module):
         self.num_experts = originalMoeBlock.num_experts
         self.top_k = originalMoeBlock.top_k
         self.args = args
-        self.act_quant = lambda x: x
 
         # gating
         self.gate = QLinearLayer(originalMoeBlock.gate, args, enable_quant=False)
@@ -305,10 +310,6 @@ class QMixtralSparseMoeBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
-
-        # quantize activations after the MoE gate
-        if self.args.abits < 16:
-            hidden_states = self.act_quant(hidden_states)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
@@ -359,7 +360,7 @@ class QMixtralDecoderLayer(nn.Module):
         super().__init__()
         self.args = args
         self.hidden_size = originalLayer.hidden_size
-        self.act_quant = lambda x: x
+        # self.act_quant = lambda x: x
 
         self.self_attn = QMixtralAttention(originalLayer.self_attn, args)
 
@@ -411,9 +412,6 @@ class QMixtralDecoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
-        # quantize activations before feed it to the attention module
-        if self.args.abits < 16:
-            hidden_states = self.act_quant(hidden_states)
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(

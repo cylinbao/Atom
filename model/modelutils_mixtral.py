@@ -114,8 +114,11 @@ def add_act_quant_wrapper_mixtral(model, device, args, scales):
         for expert in m.block_sparse_moe.experts:
             expert.act_quant = partial(quantize_activation_wrapper, args=args)
 
-        m.act_quant = partial(quantize_activation_wrapper, args=args)
-        m.block_sparse_moe.act_quant = partial(quantize_activation_wrapper, args=args)
+        # for act quant before attn
+        m.input_layernorm.act_quant = partial(quantize_activation_wrapper, args=args)
+
+        # for act quant before MoE gate
+        m.post_attention_layernorm.act_quant = partial(quantize_activation_wrapper, args=args)
         
         layers[i] = m.cpu()
         torch.cuda.empty_cache()
