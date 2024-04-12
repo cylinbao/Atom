@@ -60,29 +60,39 @@ def reorder_model_mixtral(model, device, args, reorder_index):
         nameTemplate_moe = 'layers.{}.{}.{}.{}.{}.{}' # Something like layers.10.block_sparse_moe.experts.1.w1
 
         # pick expert.0.w1's order and reorder all related modules
-        m.block_sparse_moe.gate.reorder(
-            in_reorder_index=reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w1', 'input')],
-            out_reorder_index=None
-        )
+        # m.block_sparse_moe.gate.reorder(
+        #     in_reorder_index=reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w1', 'input')],
+        #     out_reorder_index=None
+        # )
 
         num_experts = m.block_sparse_moe.num_experts
         for j in range(num_experts):
+            w_names = []
+            for k in range(3):
+                w_names.append(
+                    reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', j, f'w{k+1}', 'input')]
+                )
+
             m.block_sparse_moe.experts[j].w1.reorder(
-                in_reorder_index=reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w1', 'input')],
-                out_reorder_index=reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w2', 'input')]
+                in_reorder_index=w_names[0],
+                out_reorder_index=w_names[1]
             )
             m.block_sparse_moe.experts[j].w3.reorder(
-                in_reorder_index=reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w1', 'input')],
-                out_reorder_index=reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w2', 'input')]
+                in_reorder_index=w_names[0],
+                out_reorder_index=w_names[1]
             )
             m.block_sparse_moe.experts[j].w2.reorder(
-                in_reorder_index=reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w2', 'input')],
+                in_reorder_index=w_names[1],
                 out_reorder_index=None
             )
 
-        m.post_attention_layernorm.register_buffer('reorder_index',
-            reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w1', 'input')],
-        )
+            m.block_sparse_moe.experts[j].register_buffer(
+                'reorder_index', w_names[0] 
+            )
+
+        # m.post_attention_layernorm.register_buffer('reorder_index',
+        #     reorder_index[nameTemplate_moe.format(i, 'block_sparse_moe', 'experts', 0, 'w1', 'input')],
+        # )
 
         layers[i] = layers[i].cpu()
         layers[i] = m.cpu()
@@ -112,7 +122,8 @@ def add_act_quant_wrapper_mixtral(model, device, args, scales):
         m.self_attn.k_quant = partial(quantize_attn_k_wrapper, args=args)
 
         for expert in m.block_sparse_moe.experts:
-            expert.act_quant = partial(quantize_activation_wrapper, args=args)
+            expert.act_quant1 = partial(quantize_activation_wrapper, args=args)
+            expert.act_quant2 = partial(quantize_activation_wrapper, args=args)
 
         m.act_quant = partial(quantize_activation_wrapper, args=args)
         m.block_sparse_moe.act_quant = partial(quantize_activation_wrapper, args=args)

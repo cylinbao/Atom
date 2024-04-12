@@ -243,19 +243,16 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
         super().__init__()
         self.ffm_dim = originalTop2MLP.ffn_dim
         self.hidden_dim = originalTop2MLP.hidden_dim
+        self.register_buffer("reorder_index", None)
+        self.args = args
 
         self.w1 = QLinearLayer(originalTop2MLP.w1, args)
         self.w2 = QLinearLayer(originalTop2MLP.w2, args)
         self.w3 = QLinearLayer(originalTop2MLP.w3, args)
 
         self.act_fn = originalTop2MLP.act_fn
-        self.act_quant = lambda x: x
-
-    def forward(self, hidden_states):
-        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
-        current_hidden_states = self.act_quant(current_hidden_states)
-        current_hidden_states = self.w2(current_hidden_states)
-        return current_hidden_states
+        self.act_quant1 = lambda x: x
+        self.act_quant2 = lambda x: x
 
     def quant(self):
         self.w1.quant()
@@ -269,6 +266,21 @@ class QMixtralBlockSparseTop2MLP(nn.Module):
         self.w2 = self.w2.to(*args, **kwargs)
         self.w3 = self.w3.to(*args, **kwargs)
         return self
+
+    def forward(self, hidden_states):
+        # reoder the hidden_states that get routed to this expert
+        if self.reorder_index is not None:
+            assert hidden_states.shape[hidden_states.dim()-1] == self.reorder_index.shape[0]
+            hidden_states = torch.index_select(hidden_states, hidden_states.dim()-1, self.reorder_index)
+
+        if self.args.abits < 16:
+            hidden_states = self.act_quant1(hidden_states)
+
+        current_hidden_states = self.act_fn(self.w1(hidden_states)) * self.w3(hidden_states)
+        if self.args.abits < 16:
+            current_hidden_states = self.act_quant2(current_hidden_states)
+        current_hidden_states = self.w2(current_hidden_states)
+        return current_hidden_states
 
 
 class QMixtralSparseMoeBlock(nn.Module):
@@ -286,7 +298,8 @@ class QMixtralSparseMoeBlock(nn.Module):
         self.act_quant = lambda x: x
 
         # gating
-        self.gate = QLinearLayer(originalMoeBlock.gate, args, enable_quant=False)
+        self.gate = originalMoeBlock.gate
+        # self.gate = QLinearLayer(originalMoeBlock.gate, args, enable_quant=False)
 
         self.experts = nn.ModuleList(
             [QMixtralBlockSparseTop2MLP(originalMoeBlock.experts[i], args) for i in range(self.num_experts)]
@@ -307,8 +320,8 @@ class QMixtralSparseMoeBlock(nn.Module):
         router_logits = self.gate(hidden_states)
 
         # quantize activations after the MoE gate
-        if self.args.abits < 16:
-            hidden_states = self.act_quant(hidden_states)
+        # if self.args.abits < 16:
+        #     hidden_states = self.act_quant(hidden_states)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
